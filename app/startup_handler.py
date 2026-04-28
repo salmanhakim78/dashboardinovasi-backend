@@ -1,16 +1,12 @@
 """
-Startup Handler for FastAPI Application - FIXED VERSION
+Startup Handler for FastAPI Application - OOM FIXED VERSION
 Handles initialization of vector search cache and clustering cache
-✅ FIXED: Added database connection in lifespan context
+✅ FIXED: Removed heavy cache loading at startup to prevent Out of Memory
+✅ Cache will load lazily on first request instead
 """
 
 from fastapi import FastAPI
 from app.database import database
-from app.services.vector_search_service import load_inovasi_embeddings_cache
-from app.services.clustering_service import (
-    load_cache_from_database,
-    check_and_auto_run_clustering,
-)
 from contextlib import asynccontextmanager
 
 
@@ -27,47 +23,16 @@ async def lifespan(app: FastAPI):
     print("🚀 BRIDA AI System Starting...")
     print("=" * 60)
 
-    # ✅ STEP 0: CONNECT TO DATABASE (THIS WAS MISSING!)
-    print("\n📊 Step 0: Connecting to Database...")
+    # STEP 0: CONNECT TO DATABASE ONLY
+    # ✅ Tidak load cache saat startup untuk mencegah OOM
+    # Cache akan di-load secara lazy saat pertama kali dibutuhkan
+    print("\n📊 Connecting to Database...")
     try:
         await database.connect()
         print("✅ Database connected successfully")
     except Exception as e:
         print(f"❌ Database connection failed: {e}")
         print("⚠️ Application will run with limited functionality")
-        # Don't yield yet - continue with startup to allow health checks
-        # but skip cache loading
-
-    # Only continue with cache loading if database is connected
-    if database.is_connected:
-        # 1. Load Vector Search Embeddings Cache
-        print("\n📊 Step 1: Loading Vector Search Cache...")
-        embeddings_loaded = await load_inovasi_embeddings_cache()
-
-        if embeddings_loaded:
-            print("✅ Vector search cache loaded successfully")
-        else:
-            print("⚠️ Vector search cache loading failed (will retry on first query)")
-
-        # 2. Load Clustering Results Cache
-        print("\n📊 Step 2: Loading Clustering Cache...")
-        await load_cache_from_database()
-        print("✅ Clustering cache loaded")
-
-        # 3. Auto-check for new data and trigger clustering if needed
-        print("\n📊 Step 3: Checking for new data...")
-        need_clustering = await check_and_auto_run_clustering(threshold=50)
-
-        if need_clustering:
-            print("✅ Auto-clustering completed")
-            # Reload caches after clustering
-            print("\n🔄 Reloading caches after clustering...")
-            await load_inovasi_embeddings_cache()
-            await load_cache_from_database()
-        else:
-            print("✅ No clustering needed")
-    else:
-        print("\n⚠️ Skipping cache initialization due to database connection failure")
 
     print("\n" + "=" * 60)
     print("✅ BRIDA AI System Ready!")
@@ -83,7 +48,7 @@ async def lifespan(app: FastAPI):
     print("👋 BRIDA AI System Shutting Down...")
     print("=" * 60)
 
-    # ✅ DISCONNECT DATABASE
+    # DISCONNECT DATABASE
     try:
         await database.disconnect()
         print("✅ Database disconnected")
