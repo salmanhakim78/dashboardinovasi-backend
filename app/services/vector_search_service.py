@@ -2,19 +2,32 @@
 Vector Search Service for Chatbot Enhancement
 Handles semantic search using embeddings to find relevant innovations
 even when there are typos or semantic variations.
+✅ FIXED: Lazy loading model to prevent Out of Memory on startup
 """
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from app.database import database
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 import asyncio
 
 # ===============================
-# MODEL (Same as clustering service)
+# MODEL - LAZY LOADED
+# ✅ Tidak di-load saat import, tapi saat pertama kali dibutuhkan
 # ===============================
-embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+_embedding_model = None
+
+
+def get_embedding_model():
+    """Lazy load model hanya saat pertama kali dibutuhkan"""
+    global _embedding_model
+    if _embedding_model is None:
+        print("🔄 Loading embedding model (first time)...")
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+        print("✅ Embedding model loaded")
+    return _embedding_model
+
 
 # ===============================
 # CACHE FOR EMBEDDINGS
@@ -65,7 +78,6 @@ async def load_inovasi_embeddings_cache():
         # Build embeddings
         texts = []
         for item in _inovasi_data_cache:
-            # Same text format as clustering
             text = (
                 f"Judul: {item['judul_inovasi']}. "
                 f"Urusan: {item.get('urusan_utama', '')}. "
@@ -74,8 +86,9 @@ async def load_inovasi_embeddings_cache():
             )
             texts.append(text)
 
-        # Generate embeddings
-        _embeddings_cache = embedding_model.encode(texts, show_progress_bar=False)
+        # Generate embeddings (lazy load model here)
+        model = get_embedding_model()
+        _embeddings_cache = model.encode(texts, show_progress_bar=False)
 
         _cache_loaded = True
         print(f"✅ Embeddings cache loaded: {len(_inovasi_data_cache)} items")
@@ -84,13 +97,12 @@ async def load_inovasi_embeddings_cache():
     except Exception as e:
         print(f"❌ Error loading embeddings cache: {e}")
         import traceback
-
         traceback.print_exc()
         return False
 
 
 # ===============================
-# REFRESH CACHE (untuk tambahan data baru)
+# REFRESH CACHE
 # ===============================
 async def refresh_embeddings_cache():
     """
@@ -110,14 +122,6 @@ async def vector_search_inovasi(
 ) -> List[Dict]:
     """
     Cari inovasi menggunakan semantic similarity.
-
-    Args:
-        query: User query string
-        top_k: Number of top results to return
-        min_similarity: Minimum similarity threshold (0-1)
-
-    Returns:
-        List of dict with keys: id, judul_inovasi, admin_opd, similarity_score
     """
     global _embeddings_cache, _inovasi_data_cache, _cache_loaded
 
@@ -131,8 +135,9 @@ async def vector_search_inovasi(
         return []
 
     try:
-        # Generate query embedding
-        query_embedding = embedding_model.encode([query], show_progress_bar=False)
+        # Generate query embedding (lazy load model)
+        model = get_embedding_model()
+        query_embedding = model.encode([query], show_progress_bar=False)
 
         # Calculate cosine similarity
         similarities = cosine_similarity(query_embedding, _embeddings_cache)[0]
@@ -143,11 +148,8 @@ async def vector_search_inovasi(
         results = []
         for idx in top_indices:
             score = float(similarities[idx])
-
-            # Filter by minimum similarity
             if score < min_similarity:
                 continue
-
             inovasi = _inovasi_data_cache[idx].copy()
             inovasi["similarity_score"] = round(score, 4)
             results.append(inovasi)
@@ -163,7 +165,6 @@ async def vector_search_inovasi(
     except Exception as e:
         print(f"❌ Vector search error: {e}")
         import traceback
-
         traceback.print_exc()
         return []
 
@@ -176,20 +177,7 @@ async def hybrid_search_inovasi(
 ) -> Optional[Dict]:
     """
     Gabungkan vector search + SQL LIKE search.
-    Strategy:
-    1. Try SQL LIKE first (exact/partial match)
-    2. If no result, use vector search (semantic match)
-    3. Rank and combine results
-
-    Args:
-        query: Original user query
-        keywords: Extracted keywords from query
-        top_k: Number of results to consider
-
-    Returns:
-        Best matching inovasi or None
     """
-
     print(f"\n{'='*60}")
     print(f"HYBRID SEARCH: '{query}'")
     print(f"Keywords: {keywords}")
@@ -198,7 +186,7 @@ async def hybrid_search_inovasi(
     sql_results = []
     vector_results = []
 
-    # 1. SQL LIKE Search (for exact/partial matches)
+    # 1. SQL LIKE Search
     if keywords:
         for keyword in keywords:
             query_sql = """
@@ -223,33 +211,28 @@ async def hybrid_search_inovasi(
                 END
             LIMIT 3
             """
-
             results = await database.fetch_all(query_sql, {"keyword": f"%{keyword}%"})
-
             if results:
                 sql_results.extend([dict(r) for r in results])
                 print(f"✅ SQL found {len(results)} results for keyword: '{keyword}'")
 
-    # 2. Vector Search (for semantic similarity & typo tolerance)
+    # 2. Vector Search
     vector_results = await vector_search_inovasi(
         query, top_k=top_k, min_similarity=0.25
     )
 
     # 3. Combine & Rank Results
-    # Strategy: Prioritize SQL results (exact match), then vector results
     combined = {}
 
-    # Add SQL results with high priority score
     for item in sql_results:
         item_id = item["id"]
         if item_id not in combined:
             combined[item_id] = {
                 **item,
-                "match_score": 1.0,  # Highest priority for SQL match
+                "match_score": 1.0,
                 "match_type": "exact",
             }
 
-    # Add vector results
     for item in vector_results:
         item_id = item["id"]
         if item_id not in combined:
@@ -259,14 +242,12 @@ async def hybrid_search_inovasi(
                 "match_type": "semantic",
             }
         else:
-            # If already in SQL results, boost score
             combined[item_id]["match_score"] = max(
                 combined[item_id]["match_score"],
-                item["similarity_score"] * 0.8,  # Slightly lower weight
+                item["similarity_score"] * 0.8,
             )
             combined[item_id]["match_type"] = "hybrid"
 
-    # Sort by match_score
     ranked_results = sorted(
         combined.values(), key=lambda x: x["match_score"], reverse=True
     )
@@ -291,15 +272,6 @@ async def vector_search_collaboration(
 ) -> List[Dict]:
     """
     Cari inovasi yang mirip untuk kolaborasi menggunakan vector similarity.
-    Alternative untuk clustering-based collaboration.
-
-    Args:
-        inovasi_id: ID inovasi yang ingin dicari pasangannya
-        top_k: Number of top similar inovasi
-        min_similarity: Minimum similarity threshold
-
-    Returns:
-        List of similar inovasi with similarity scores
     """
     global _embeddings_cache, _inovasi_data_cache, _cache_loaded
 
@@ -332,33 +304,24 @@ async def vector_search_collaboration(
 
         results = []
         for idx in top_indices:
-            # Skip self
             if idx == target_idx:
                 continue
-
             score = float(similarities[idx])
-
-            # Filter by minimum similarity
             if score < min_similarity:
                 continue
-
             inovasi = _inovasi_data_cache[idx].copy()
             inovasi["similarity_score"] = round(score, 4)
             results.append(inovasi)
-
-            # Stop when we have enough results
             if len(results) >= top_k:
                 break
 
         print(
             f"🔍 Collaboration search for inovasi {inovasi_id}: found {len(results)} similar items"
         )
-
         return results
 
     except Exception as e:
         print(f"❌ Collaboration vector search error: {e}")
         import traceback
-
         traceback.print_exc()
         return []
