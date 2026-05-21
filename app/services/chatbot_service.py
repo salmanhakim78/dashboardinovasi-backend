@@ -567,6 +567,7 @@ async def chatbot_answer(question: str) -> str:
 
         context_data = {"found_in_db": False, "data_type": query_type, "content": {}}
 
+
         # ── Kolaborasi ──────────────────────────────────────────
         if query_type == "kolaborasi":
             inovasi = None
